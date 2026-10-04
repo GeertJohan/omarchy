@@ -1,6 +1,9 @@
-// Back off only attempts that never receive a finger prompt. A failed match
-// leaves the reader reachable and keeps the normal swipe interval.
+// Back off missing prompts and fast device errors; ordinary mismatches
+// and a full scan window without a finger keep the normal swipe interval.
 var MATCH_RETRY_MS = 250
+var FAST_ERROR_MS = 2000
+var NUDGE_COOLDOWN_MS = 2000
+var IDLE_CLEAR_MS = 32000
 var ERROR_RETRY_BASE_MS = 1000
 // Leave enough idle time for fprintd to exit and clear a wedged claim.
 var FPRINTD_IDLE_EXIT_MS = 30000
@@ -19,18 +22,31 @@ function retryDelayMs(streak) {
   return Math.min(delay, ERROR_RETRY_CAP_MS)
 }
 
+// Preserve the daemon idle window even under continuous user activity.
+function shouldNudge(nowMs, lastNudgeMs, lastSettleMs, currentIntervalMs) {
+  if (currentIntervalMs <= MATCH_RETRY_MS) return false
+  var sinceNudge = nowMs - lastNudgeMs
+  var sinceSettle = nowMs - lastSettleMs
+  // A backward clock step cannot count as a completed idle window.
+  if (sinceNudge >= 0 && sinceNudge < Math.max(NUDGE_COOLDOWN_MS, currentIntervalMs)) return false
+  if (sinceSettle < 0) sinceSettle = 0
+  if (currentIntervalMs >= ERROR_RETRY_CAP_MS && sinceSettle < IDLE_CLEAR_MS) return false
+  return true
+}
+
+
 // A failed probe is unknown, so it cannot disable authentication for the lock.
 function classifyProbe(text) {
   var s = String(text || "").trim()
-  if (/^\s*-\s*#[0-9]+:/m.test(s)) return "yes"
+  if (/^[ \t]*-[ \t]*#[0-9]+:/m.test(s)) return "yes"
   if (s === "no") return "no"
   if (/has no fingers enrolled/i.test(s)) return "no"
   return "unknown"
 }
 
 // Resume-time misses stay at the first tier while fprintd restarts.
-function nextStreak(streak, reachedDevice, inResumeGrace) {
-  if (reachedDevice) return 0
+function nextStreak(streak, usableAttempt, inResumeGrace) {
+  if (usableAttempt) return 0
   if (inResumeGrace) return 1
   return streak + 1
 }
@@ -54,6 +70,10 @@ function isUnavailable(streak) {
 if (typeof module !== "undefined") {
   module.exports = {
     MATCH_RETRY_MS: MATCH_RETRY_MS,
+    FAST_ERROR_MS: FAST_ERROR_MS,
+    NUDGE_COOLDOWN_MS: NUDGE_COOLDOWN_MS,
+    IDLE_CLEAR_MS: IDLE_CLEAR_MS,
+    shouldNudge: shouldNudge,
     ERROR_RETRY_BASE_MS: ERROR_RETRY_BASE_MS,
     ERROR_RETRY_CAP_MS: ERROR_RETRY_CAP_MS,
     FPRINTD_IDLE_EXIT_MS: FPRINTD_IDLE_EXIT_MS,

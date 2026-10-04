@@ -90,6 +90,10 @@ if sudo fprintd-enroll "$USER"; then
     # pam_fprintd with nothing to match.
     setup_pam_config
     "$OMARCHY_PATH/bin/omarchy-apply-lock"
+    if [[ ! -f /etc/pam.d/omarchy-lock-fingerprint ]]; then
+      echo "Fingerprint enrollment succeeded, but lock-screen configuration could not be confirmed. Run omarchy-apply-lock and try again." >&2
+      exit 1
+    fi
     echo -e "\e[32m\nPerfect! Fingerprint authentication is now configured.\e[0m"
     echo "You can use your fingerprint for sudo, polkit, and lock screen (Super + Ctrl + L)."
   else

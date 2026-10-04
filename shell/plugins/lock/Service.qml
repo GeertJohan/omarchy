@@ -25,6 +25,10 @@ Item {
   property bool fingerprintConfigured: false
   property int fingerprintUnreachedStreak: 0
   property bool fingerprintAttemptReachedDevice: false
+  property bool fingerprintAttemptFastError: false
+  property double fingerprintAttemptPromptedAtMs: 0
+  property double fingerprintLastNudgeMs: 0
+  property double fingerprintLastSettleMs: 0
   property double fingerprintResumedAtMs: 0
   property int fingerprintProbeStreak: 0
   property bool previewVisible: false
@@ -56,7 +60,7 @@ Item {
   readonly property var batteryService: shell && shell.services ? shell.firstPartyServiceFor("omarchy.battery") : null
   readonly property bool powerSaverActive: batteryService ? batteryService.powerSaverOnBattery : false
   // A prompt clears the unavailable notice before the attempt finishes.
-  readonly property bool fingerprintUnavailable: fingerprintConfigured && !fingerprintAttemptReachedDevice && FingerprintModel.isUnavailable(fingerprintUnreachedStreak)
+  readonly property bool fingerprintUnavailable: FingerprintModel.isUnavailable(fingerprintProbeStreak) || (fingerprintConfigured && (!fingerprintAttemptReachedDevice || fingerprintAttemptFastError) && FingerprintModel.isUnavailable(fingerprintUnreachedStreak))
 
   function realScreenCount() {
     var screens = Quickshell.screens || []
@@ -150,6 +154,7 @@ Item {
       return
     }
     fingerprintProbeStreak = 0
+    fingerprintRecheckTimer.stop()
     fingerprintConfigured = status === "yes"
     if (lockRequested && fingerprintConfigured) {
       // A pending retry already owns the next attempt.
@@ -177,6 +182,10 @@ Item {
     authenticatingPassword = false
     fingerprintAuthenticating = false
     fingerprintUnreachedStreak = 0
+    fingerprintAttemptFastError = false
+    fingerprintAttemptPromptedAtMs = 0
+    fingerprintLastNudgeMs = 0
+    fingerprintLastSettleMs = 0
     fingerprintResumedAtMs = 0
     fingerprintProbeStreak = 0
     fingerprintRecheckTimer.stop()
@@ -230,7 +239,30 @@ Item {
     root.monitorDpmsKnown = false
     if (!wakeProcess.running) wakeProcess.running = true
     if (lockRequested) armBlankTimer()
+    nudgeFingerprint()
   }
+
+  // User activity advances retries without recreating a busy retry loop.
+  function nudgeFingerprint() {
+    if (!lockRequested) return
+    if (!fingerprintConfigured && fingerprintRecheckTimer.running) {
+      var now = Date.now()
+      if (FingerprintModel.shouldNudge(now, fingerprintLastNudgeMs, now - FingerprintModel.IDLE_CLEAR_MS, fingerprintRecheckTimer.interval)) {
+        fingerprintLastNudgeMs = now
+        fingerprintRecheckTimer.interval = FingerprintModel.MATCH_RETRY_MS
+        fingerprintRecheckTimer.restart()
+      }
+      return
+    }
+    if (!fingerprintConfigured) return
+    if (fingerprintPam.active || fingerprintAuthenticating) return
+    if (!fingerprintRetryTimer.running) return
+    var now = Date.now()
+    if (!FingerprintModel.shouldNudge(now, fingerprintLastNudgeMs, fingerprintLastSettleMs, fingerprintRetryTimer.interval)) return
+    fingerprintLastNudgeMs = now
+    armFingerprintRetry(FingerprintModel.MATCH_RETRY_MS)
+  }
+
 
   function armFingerprintRetry(delayMs) {
     fingerprintRetryTimer.interval = delayMs
@@ -327,19 +359,24 @@ Item {
 
     fingerprintAuthenticating = true
     fingerprintAttemptReachedDevice = false
+    fingerprintAttemptFastError = false
+    fingerprintAttemptPromptedAtMs = 0
     if (!fingerprintPam.start()) {
-      // A missing PAM configuration needs a fresh enrollment check.
+      // Pace a failed start while checking whether its PAM configuration was
+      // removed; a definitive "no" stops retries and hides the indicator.
       settleFingerprintAttempt()
       refreshFingerprintStatus()
       return
     }
-    // Bound a claim that never produces a finger prompt.
+    // Bound claims that never prompt; a normal verify waits for a finger
+    // under pam_fprintd's own timeout after reaching the reader.
     fingerprintReachTimer.restart()
   }
 
   // A prompt proves the claim landed, so stop waiting for reachability.
   function noteFingerprintReachedDevice() {
     fingerprintAttemptReachedDevice = true
+    fingerprintAttemptPromptedAtMs = Date.now()
     fingerprintReachTimer.stop()
   }
 
@@ -351,15 +388,17 @@ Item {
   }
 
   // onError and onCompleted can both fire; settle each attempt once.
-  function settleFingerprintAttempt() {
+  function settleFingerprintAttempt(deviceError) {
     if (!fingerprintAuthenticating) return
     fingerprintAuthenticating = false
     fingerprintReachTimer.stop()
     if (!lockRequested || !fingerprintConfigured) return
 
-    // A PAM error can arrive before the sleep watcher notices resume.
+    // An error can arrive before the sleep watcher notices the wall-clock gap.
     var now = Date.now()
-    if (!fingerprintAttemptReachedDevice && fingerprintSleepWatch.running
+    fingerprintAttemptFastError = !!deviceError && fingerprintAttemptReachedDevice && now - fingerprintAttemptPromptedAtMs < FingerprintModel.FAST_ERROR_MS
+    var usableAttempt = fingerprintAttemptReachedDevice && !fingerprintAttemptFastError
+    if (!usableAttempt && fingerprintSleepWatch.running
         && FingerprintModel.spannedSleep(now - fingerprintSleepWatch.lastTickMs, fingerprintSleepWatch.interval)) {
       noteFingerprintResumed()
     }
@@ -368,13 +407,14 @@ Item {
     // the misses and the recovery from them leave a trace.
     var previousStreak = fingerprintUnreachedStreak
     var inGrace = FingerprintModel.inResumeGrace(now, fingerprintResumedAtMs)
-    fingerprintUnreachedStreak = FingerprintModel.nextStreak(previousStreak, fingerprintAttemptReachedDevice, inGrace)
-    if (!fingerprintAttemptReachedDevice) {
+    fingerprintUnreachedStreak = FingerprintModel.nextStreak(previousStreak, usableAttempt, inGrace)
+    if (!usableAttempt) {
       var crossed = !FingerprintModel.isUnavailable(previousStreak) && FingerprintModel.isUnavailable(fingerprintUnreachedStreak)
       logEvent((crossed ? "fingerprint-unavailable" : "fingerprint-unreached") + ": streak=" + fingerprintUnreachedStreak)
     } else if (previousStreak > 0) {
       logEvent("fingerprint-recovered: streak=" + previousStreak)
     }
+    fingerprintLastSettleMs = now
     armFingerprintRetry(FingerprintModel.retryDelayMs(fingerprintUnreachedStreak))
   }
 
@@ -385,7 +425,7 @@ Item {
       if (fingerprintUnreachedStreak > 0) logEvent("fingerprint-recovered: streak=" + fingerprintUnreachedStreak)
       finishUnlock()
     } else {
-      settleFingerprintAttempt()
+      settleFingerprintAttempt(result === PamResult.Error)
     }
   }
 
@@ -433,7 +473,7 @@ Item {
         backgroundPath: root.backgroundPath
         videoPosterPath: root.videoPosterPath
         backgroundVersion: root.backgroundVersion
-        fingerprintConfigured: root.fingerprintConfigured
+        fingerprintConfigured: root.fingerprintConfigured || root.fingerprintUnavailable
         fingerprintUnavailable: root.fingerprintUnavailable
         authenticatingPassword: root.authenticatingPassword
         failureMessage: root.failureMessage
@@ -467,7 +507,7 @@ Item {
       backgroundPath: root.backgroundPath
       videoPosterPath: root.videoPosterPath
       backgroundVersion: root.backgroundVersion
-      fingerprintConfigured: root.fingerprintConfigured
+      fingerprintConfigured: root.fingerprintConfigured || root.fingerprintUnavailable
       fingerprintUnavailable: root.fingerprintUnavailable
       authenticatingPassword: false
       failureMessage: ""
@@ -521,7 +561,7 @@ Item {
     }
 
     onError: function(error) {
-      root.settleFingerprintAttempt()
+      root.settleFingerprintAttempt(true)
     }
   }
 
@@ -621,7 +661,7 @@ Item {
   // Keep fprintd errors distinguishable from an explicit empty enrollment.
   Process {
     id: fingerprintCheckProc
-    command: ["bash", "-c", "if [[ -f /etc/pam.d/omarchy-lock-fingerprint ]] && command -v fprintd-list >/dev/null 2>&1; then fprintd-list \"$USER\" 2>&1; else echo no; fi"]
+    command: ["bash", "-c", "if [[ -f /etc/pam.d/omarchy-lock-fingerprint ]] && command -v fprintd-list >/dev/null 2>&1; then LC_ALL=C fprintd-list \"$USER\" 2>&1; else echo no; fi"]
     stdout: StdioCollector { id: fingerprintCheckStdout; waitForEnd: true }
     onExited: root.applyFingerprintProbe(fingerprintCheckStdout.text)
   }
