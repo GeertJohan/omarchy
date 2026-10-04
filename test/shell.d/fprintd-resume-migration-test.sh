@@ -87,14 +87,16 @@ grep -q sentinel "$dropin_dst" || fail "migration leaves an existing drop-in alo
 [[ ! -s $reload_log ]] || fail "migration does not reload systemd when nothing changed" "calls: $(<"$reload_log")"
 pass "migration leaves existing files alone"
 
-# A copy under the old unprefixed name is replaced by the numbered one.
+# An unnumbered drop-in may belong to the administrator; never replace it.
 legacy="$TMPDIR/fprintd.service.d/stop-timeout.conf"
-rm -f "$dropin_dst"; printf 'old\n' >"$legacy"
+rm -f "$dropin_dst"; printf '[Service]\nTimeoutStopSec=15s\n' >"$legacy"
+cp "$legacy" "$TMPDIR/saved-admin-timeout"
 : >"$reload_log"
 run_migration
-[[ ! -e $legacy && -f $dropin_dst ]] || fail "migration replaces the unprefixed drop-in" "legacy: $(ls "$legacy" 2>&1); dst: $(ls "$dropin_dst" 2>&1)"
-grep -qx "daemon-reload" "$reload_log" || fail "migration reloads systemd after replacing the drop-in"
-pass "migration replaces the unprefixed drop-in with the numbered one"
+cmp -s "$legacy" "$TMPDIR/saved-admin-timeout" || fail "migration preserves the administrator's unnumbered drop-in"
+[[ -f $dropin_dst ]] || fail "migration installs the numbered drop-in alongside the administrator's file"
+grep -qx "daemon-reload" "$reload_log" || fail "migration reloads systemd after installing the numbered drop-in"
+pass "migration preserves the administrator's unnumbered drop-in"
 
 # The drop-in is installed on its own where only the hook is already present.
 rm -rf "$TMPDIR/fprintd.service.d"

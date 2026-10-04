@@ -23,6 +23,8 @@ cat > "$scratch/bin/sudo" <<'STUB'
 #!/bin/bash
 case "$1" in
   pacman | fprintd-enroll) exec "$@" ;;
+  sed) printf 'pam %s\n' "$*" >> "$CALL_LOG" ;;
+  tee) cat >/dev/null ;;
   *) echo "Unexpected privileged call: $*" >> "$CALL_LOG"; exit 99 ;;
 esac
 STUB
@@ -42,12 +44,12 @@ cat > "$scratch/bin/fprintd-enroll" <<'STUB'
 #!/bin/bash
 # Stop before verification/PAM; no host authentication files may be changed.
 echo enroll >> "$CALL_LOG"
-exit 1
+exit "${ENROLL_STATUS:-1}"
 STUB
 cat > "$scratch/bin/fprintd-verify" <<'STUB'
 #!/bin/bash
 echo verify >> "$CALL_LOG"
-exit 1
+exit "${VERIFY_STATUS:-1}"
 STUB
 chmod +x "$scratch/bin/"*
 
@@ -91,3 +93,16 @@ pass "a failed installation stops before enrollment"
 HARDWARE_STATUS=1 run_setup
 [[ ! -s $CALL_LOG ]] || fail "missing hardware stops before package operations"
 pass "missing hardware performs no package operations"
+
+# Successful setup must reuse the same lock/recovery installer as updates.
+cat > "$scratch/bin/omarchy-apply-lock" <<'STUB'
+#!/bin/bash
+echo apply-lock >> "$CALL_LOG"
+STUB
+chmod +x "$scratch/bin/omarchy-apply-lock"
+: > "$CALL_LOG"
+OMARCHY_PATH="$scratch" ENROLL_STATUS=0 VERIFY_STATUS=0 \
+  "$ROOT/bin/omarchy-setup-security-fingerprint" > "$scratch/output" 2>&1 || fail "successful enrollment configures authentication"
+[[ $(grep -E '^(enroll|verify|apply-lock)$' "$CALL_LOG") == $'enroll\nverify\napply-lock' ]] ||
+  fail "setup configures lock recovery once, after enrollment and verification"
+pass "setup reuses apply-lock after enrollment and verification"

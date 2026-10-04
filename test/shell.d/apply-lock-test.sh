@@ -85,7 +85,8 @@ cat >"$trusted_fprintd" <<'EOF'
 
 printf '%s\n' "$EUID" >"$TEST_TRUSTED_UID"
 printf '%s\n' "$*" >"$TEST_TRUSTED_ARGS"
-echo " - #0: right-index-finger"
+printf '%s\n' "${TEST_FPRINTD_OUTPUT:- - #0: right-index-finger}"
+exit "${TEST_FPRINTD_STATUS:-0}"
 EOF
 
 cat >"$poison_bin/fprintd-list" <<'EOF'
@@ -93,7 +94,8 @@ cat >"$poison_bin/fprintd-list" <<'EOF'
 
 printf '%s\n' "$EUID" >"$TEST_ATTACK_MARKER"
 printf '%s\n' "$*" >"$TEST_ATTACK_ARGS"
-echo " - #0: right-index-finger"
+printf '%s\n' "${TEST_FPRINTD_OUTPUT:- - #0: right-index-finger}"
+exit "${TEST_FPRINTD_STATUS:-0}"
 EOF
 
 chmod +x "$trusted_fprintd" "$poison_bin/fprintd-list"
@@ -125,19 +127,19 @@ prepare_helper() {
         print "  export PATH=\"" trusted_root_bin "\""
         next
       }
-      if (line == "if [[ -x /usr/bin/fprintd-list ]] &&") {
+      if (line == "if [[ -x /usr/bin/fprintd-list ]]; then") {
         if (use_absolute_fprintd == 1) {
-          print "if [[ -x \"" trusted_fprintd "\" ]] &&"
+          print "if [[ -x \"" trusted_fprintd "\" ]]; then"
         } else {
-          print "if command -v fprintd-list >/dev/null 2>&1 &&"
+          print "if command -v fprintd-list >/dev/null 2>&1; then"
         }
         next
       }
-      if (line == "  /usr/bin/fprintd-list \"$target_user\" 2>/dev/null | grep -q '\'' - #'\''; then") {
+      if (line == "  fingerprint_status=$(/usr/bin/fprintd-list \"$target_user\" 2>&1 || true)") {
         if (use_absolute_fprintd == 1) {
-          print "  \"" trusted_fprintd "\" \"$target_user\" 2>/dev/null | grep -q '\'' - #'\''; then"
+          print "  fingerprint_status=$(\"" trusted_fprintd "\" \"$target_user\" 2>&1 || true)"
         } else {
-          print "  fprintd-list \"$target_user\" 2>/dev/null | grep -q '\'' - #'\''; then"
+          print "  fingerprint_status=$(fprintd-list \"$target_user\" 2>&1 || true)"
         }
         next
       }
@@ -235,3 +237,30 @@ grep -Fx "$target_user" "$attack_args" >/dev/null ||
   fail "the planted fprintd-list receives the target user"
 [[ -s $fingerprint_pam ]] || fail "the planted fprintd-list controls the fingerprint PAM branch"
 pass "the root lock-helper matrix rejects the vulnerable PATH lookup"
+
+# A failed probe must retain the recovery machinery needed by a later resume.
+run_as_root "$patched_helper" "restore the enrolled fingerprint fixture"
+cp "$fingerprint_pam" "$test_tmp/saved-pam"
+cp "$test_tmp/system-sleep/fprintd-resume" "$test_tmp/saved-hook"
+cp "$test_tmp/fprintd.service.d/10-stop-timeout.conf" "$test_tmp/saved-timeout"
+TEST_FPRINTD_OUTPUT="Impossible to get devices: Could not activate remote peer" TEST_FPRINTD_STATUS=1 \
+  run_as_root "$patched_helper" "an unavailable daemon preserves fingerprint authentication"
+for pair in "$fingerprint_pam:saved-pam" "$test_tmp/system-sleep/fprintd-resume:saved-hook" "$test_tmp/fprintd.service.d/10-stop-timeout.conf:saved-timeout"; do
+  cmp -s "${pair%:*}" "$test_tmp/${pair##*:}" || fail "an unknown enrollment probe preserves existing recovery files"
+done
+pass "an unknown enrollment probe preserves existing recovery files"
+
+# The device name and empty-enrollment prose both contain the word "finger".
+TEST_FPRINTD_OUTPUT="User alice has no fingers enrolled for Goodix MOC Fingerprint Sensor." \
+  run_as_root "$patched_helper" "an empty enrollment clears fingerprint authentication"
+[[ -s $password_pam ]] || fail "password authentication remains configured without fingerprints"
+[[ ! -e $fingerprint_pam && ! -e $test_tmp/system-sleep/fprintd-resume && ! -e $test_tmp/fprintd.service.d/10-stop-timeout.conf ]] ||
+  fail "empty enrollment removes fingerprint PAM and resume recovery files"
+pass "empty enrollment removes fingerprint authentication and its resume recovery"
+
+run_as_root "$patched_helper" "restore enrollment before removing fprintd-list"
+rm -f "$trusted_fprintd"
+run_as_root "$patched_helper" "a missing fingerprint package clears fingerprint authentication"
+[[ ! -e $fingerprint_pam && ! -e $test_tmp/system-sleep/fprintd-resume && ! -e $test_tmp/fprintd.service.d/10-stop-timeout.conf ]] ||
+  fail "a missing fprintd-list removes fingerprint PAM and resume recovery files"
+pass "a missing fprintd-list removes fingerprint authentication and its resume recovery"
