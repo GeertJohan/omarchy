@@ -24,7 +24,7 @@ cat > "$scratch/bin/sudo" <<'STUB'
 case "$1" in
   pacman | fprintd-enroll) exec "$@" ;;
   sed) printf 'pam %s\n' "$*" >> "$CALL_LOG" ;;
-  tee) cat >/dev/null ;;
+  tee) printf 'pam %s\n' "$*" >> "$CALL_LOG"; cat >/dev/null ;;
   *) echo "Unexpected privileged call: $*" >> "$CALL_LOG"; exit 99 ;;
 esac
 STUB
@@ -60,13 +60,19 @@ exit "${VERIFY_STATUS:-1}"
 STUB
 chmod +x "$scratch/bin/"*
 
+cat > "$scratch/bin/omarchy-apply-lock" <<'STUB'
+#!/bin/bash
+echo apply-lock >> "$CALL_LOG"
+STUB
+chmod +x "$scratch/bin/omarchy-apply-lock"
+
 run_setup() {
   : > "$CALL_LOG"
-  if "$ROOT/bin/omarchy-setup-security-fingerprint" > "$scratch/output" 2>&1; then
+  if OMARCHY_PATH="$scratch" "$ROOT/bin/omarchy-setup-security-fingerprint" > "$scratch/output" 2>&1; then
     fail "setup stops on the simulated enrollment or installation failure"
   fi
-  if grep -q 'Unexpected privileged call' "$CALL_LOG"; then
-    fail "setup does not change PAM after failed enrollment"
+  if grep -Eq '^(pam |apply-lock$|Unexpected privileged call)' "$CALL_LOG"; then
+    fail "setup does not change PAM or lock recovery after failed enrollment"
   fi
 }
 
@@ -102,11 +108,6 @@ HARDWARE_STATUS=1 run_setup
 pass "missing hardware performs no package operations"
 
 # Successful setup must reuse the same lock/recovery installer as updates.
-cat > "$scratch/bin/omarchy-apply-lock" <<'STUB'
-#!/bin/bash
-echo apply-lock >> "$CALL_LOG"
-STUB
-chmod +x "$scratch/bin/omarchy-apply-lock"
 : > "$CALL_LOG"
 OMARCHY_PATH="$scratch" ENROLL_STATUS=0 VERIFY_STATUS=0 \
   "$ROOT/bin/omarchy-setup-security-fingerprint" > "$scratch/output" 2>&1 || fail "successful enrollment configures authentication"
