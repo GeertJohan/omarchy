@@ -52,6 +52,9 @@ ShellRoot {
       check(!service.fingerprintUnavailable && !recheck.running, "a definitive enrollment clears probe notice and recheck")
       service.applyFingerprintProbe("ListEnrolledFingers failed: Timeout was reached")
       check(service.fingerprintConfigured, "unknown preserves a known enrollment")
+      service.applyFingerprintProbe("No devices available")
+      service.applyFingerprintProbe("ListEnrolledFingers failed: Timeout was reached")
+      check(!service.fingerprintUnavailable && !recheck.running, "known enrollment uses PAM recovery without competing probe retries")
 
       service.fingerprintAuthenticating = true
       retry.start()

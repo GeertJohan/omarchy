@@ -66,6 +66,10 @@ patched_helper="$test_tmp/omarchy-apply-lock-patched"
 absolute_only_helper="$test_tmp/omarchy-apply-lock-absolute-only"
 root_path_only_helper="$test_tmp/omarchy-apply-lock-root-path-only"
 unprotected_helper="$test_tmp/omarchy-apply-lock-unprotected"
+hook_source="$test_tmp/fprintd-resume-source"
+cp "$ROOT/default/systemd/system-sleep/fprintd-resume" "$hook_source"
+timeout_source="$test_tmp/fprintd-stop-timeout-source"
+cp "$ROOT/default/systemd/system/fprintd.service.d/10-stop-timeout.conf" "$timeout_source"
 target_user=omarchy-regression-user
 mkdir -p "$poison_bin" "$trusted_root_bin"
 
@@ -110,9 +114,9 @@ prepare_helper() {
     -v trusted_fprintd="$trusted_fprintd" \
     -v keep_root_path="$keep_root_path" \
     -v use_absolute_fprintd="$use_absolute_fprintd" \
-    -v hook_src="$ROOT/default/systemd/system-sleep/fprintd-resume" \
+    -v hook_src="$hook_source" \
     -v hook_dst="$test_tmp/system-sleep/fprintd-resume" \
-    -v timeout_src="$ROOT/default/systemd/system/fprintd.service.d/10-stop-timeout.conf" \
+    -v timeout_src="$timeout_source" \
     -v timeout_dst="$test_tmp/fprintd.service.d/10-stop-timeout.conf" '
     {
       line = $0
@@ -257,6 +261,19 @@ TEST_FPRINTD_OUTPUT="User alice has no fingers enrolled for Goodix MOC Fingerpri
 [[ ! -e $fingerprint_pam && ! -e $test_tmp/system-sleep/fprintd-resume && ! -e $test_tmp/fprintd.service.d/10-stop-timeout.conf ]] ||
   fail "empty enrollment removes fingerprint PAM and resume recovery files"
 pass "empty enrollment removes fingerprint authentication and its resume recovery"
+
+# Never enable fingerprint PAM before both recovery files are installed.
+for source in "$hook_source" "$timeout_source"; do
+  reset_runtime_files
+  mv "$source" "$source.saved"
+  if PATH="$poison_bin:/usr/bin:/bin" OMARCHY_INSTALL_USER="$target_user" \
+    "${root_runner[@]}" /bin/bash "$patched_helper" >"$test_tmp/failed-install" 2>&1; then
+    fail "missing recovery source must fail installation"
+  fi
+  [[ ! -e $fingerprint_pam ]] || fail "failed recovery installation cannot create fingerprint PAM"
+  mv "$source.saved" "$source"
+done
+pass "failed recovery installation cannot create fingerprint PAM"
 
 run_as_root "$patched_helper" "restore enrollment before removing fprintd-list"
 rm -f "$trusted_fprintd"

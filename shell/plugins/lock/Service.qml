@@ -146,6 +146,7 @@ Item {
   function applyFingerprintProbe(text) {
     var status = FingerprintModel.classifyProbe(text)
     if (status === "unknown") {
+      if (fingerprintConfigured) return
       fingerprintProbeStreak += 1
       if (lockRequested) {
         fingerprintRecheckTimer.interval = FingerprintModel.retryDelayMs(fingerprintProbeStreak)
