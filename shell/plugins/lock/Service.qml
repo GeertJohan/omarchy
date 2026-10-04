@@ -376,6 +376,7 @@ Item {
 
   // A prompt proves the claim landed, so stop waiting for reachability.
   function noteFingerprintReachedDevice() {
+    if (fingerprintAttemptReachedDevice) return
     fingerprintAttemptReachedDevice = true
     fingerprintAttemptPromptedAtMs = Date.now()
     fingerprintReachTimer.stop()

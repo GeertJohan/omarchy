@@ -106,8 +106,9 @@ ShellRoot {
 
       service.fingerprintAuthenticating = true
       service.fingerprintAttemptPromptedAtMs = Date.now() - 31000
+      service.noteFingerprintReachedDevice()
       service.handleFingerprintFinished(PamResult.Error)
-      check(service.fingerprintUnreachedStreak === 0 && retry.interval === 250, "a full scan window without a finger stays responsive")
+      check(service.fingerprintUnreachedStreak === 0 && retry.interval === 250, "a timeout message cannot restart the fast-error clock")
 
       service.fingerprintUnreachedStreak = 3
       service.fingerprintAuthenticating = true
@@ -120,6 +121,7 @@ ShellRoot {
       service.handleFingerprintFinished(PamResult.Error)
       check(service.fingerprintUnreachedStreak === 1, "error completion backs off even without a preceding error signal")
       service.fingerprintAuthenticating = true
+      service.fingerprintAttemptReachedDevice = false
       service.fingerprintAttemptPromptedAtMs = Date.now() - 5000
       service.noteFingerprintReachedDevice()
       service.handleFingerprintFinished(PamResult.Error)
